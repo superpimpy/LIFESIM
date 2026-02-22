@@ -96,7 +96,7 @@ async function handleQuickSend() {
  */
 async function handleDeletedMessage() {
     try {
-        await slashSend('*삭제된메세지입니다*');
+        await slashSend('*삭제된 메세지입니다*');
         showToast('삭제된 메시지 전송', 'success', 1200);
     } catch (e) {
         showToast('전송 실패: ' + e.message, 'error');
