@@ -13,12 +13,21 @@ import { getContext } from '../../utils/st-context.js';
 import { slashSend, slashGen, slashSendAs } from '../../utils/slash.js';
 import { showToast, escapeHtml, generateId } from '../../utils/ui.js';
 import { loadData, saveData, getExtensionSettings } from '../../utils/storage.js';
+import { getAppearanceTagsByName } from '../contacts/contacts.js';
 
 // 사건 기록 아카이브 저장 키
 const ARCHIVE_KEY = 'event-archive';
 const ARCHIVE_BINDING = 'chat';
 const DEFAULT_IMAGE_RADIUS = 10;
 const MAX_IMAGE_RADIUS = 50;
+
+/**
+ * 설정된 이미지 모서리 반경(px)을 반환한다
+ * @returns {number}
+ */
+function getImageRadius() {
+    return Math.max(0, Math.min(MAX_IMAGE_RADIUS, Number(getExtensionSettings()?.['st-lifesim']?.imageRadius ?? DEFAULT_IMAGE_RADIUS)));
+}
 
 /**
  * 퀵 센드 버튼을 sendform의 전송 버튼(#send_but) 바로 앞에 삽입한다
@@ -212,16 +221,18 @@ export function renderReadReceiptUI() {
 
 /**
  * 읽씹 연출 실행
+ * ({{user}}가 {{char}}에게 보낸 메시지를 {{char}}가 읽고 답장하지 않는 상황)
  */
 async function handleReadReceipt() {
     const ctx = getContext();
     const charName = ctx?.name2 || '{{char}}';
 
     try {
-        await slashGen(
-            `${charName} has read the message but has not replied yet. Briefly describe the situation in 1-2 sentences.`,
-            charName,
-        );
+        const tmpl = getExtensionSettings()?.['st-lifesim']?.messageTemplates?.readReceipt;
+        const prompt = tmpl
+            ? tmpl.replace(/\{charName\}/g, charName)
+            : `{{user}} sent ${charName} a message. ${charName} has read {{user}}'s message but has not replied yet. Briefly describe ${charName}'s reaction in 1-2 sentences.`;
+        await slashGen(prompt, charName);
         showToast('읽씹 연출 완료', 'success', 1500);
     } catch (e) {
         showToast('읽씹 연출 실패: ' + e.message, 'error');
@@ -271,10 +282,11 @@ async function handleNoContact() {
     const charName = ctx?.name2 || '{{char}}';
 
     try {
-        await slashGen(
-            `${charName} tried to reach the user but the user has not seen or responded yet. Briefly describe the situation in 1-2 sentences.`,
-            charName,
-        );
+        const tmpl = getExtensionSettings()?.['st-lifesim']?.messageTemplates?.noContact;
+        const prompt = tmpl
+            ? tmpl.replace(/\{charName\}/g, charName)
+            : `${charName} tried to reach {{user}} but {{user}} has not seen or responded yet. Briefly describe the situation in 1-2 sentences.`;
+        await slashGen(prompt, charName);
         showToast('연락 안 됨 연출 완료', 'success', 1500);
     } catch (e) {
         showToast('연락 안 됨 연출 실패: ' + e.message, 'error');
@@ -345,12 +357,11 @@ async function generateEvent(category) {
 
     try {
         if (ctx && typeof ctx.generateQuietPrompt === 'function') {
-            const titlePrompt = `Generate a SHORT title (under 10 words, in Korean) for an unexpected "${category}" category event that fits naturally into the current story context. Return ONLY the title text, nothing else.`;
+            const titlePrompt = `Generate a SHORT title (under 10 words) for an unexpected "${category}" category event that fits naturally into the current story context. Return ONLY the title text, nothing else.`;
             const titleResult = await ctx.generateQuietPrompt({ quietPrompt: titlePrompt, quietName: '이벤트' });
             if (titleResult) eventTitle = titleResult.trim();
 
-            const contentPrompt = `사건 카테고리: "${category}", 사건 제목: "${eventTitle}". 현재 상황에 맞는 사건 내용을 한국어 2~4문장으로 작성하세요.
-- 반드시 한국어만 사용하세요.
+            const contentPrompt = `사건 카테고리: "${category}", 사건 제목: "${eventTitle}". 현재 상황에 맞는 사건 내용을 2~4문장으로 작성하세요.
 - 출력은 사건 설명 본문만 작성하세요.
 - 해당 요청은 user와 char 사이의 메시지 주고받기를 더 재미있게 변화구를 주기 위한 것입니다.
 - "현실에서 만나게 된다" 등 메신저 형식의 룰을 깨뜨리려는 내용은 일체 금지합니다.
@@ -517,7 +528,7 @@ export function renderVoiceMemoUI() {
     imageBtn.onclick = async () => {
         const url = imageInput.value.trim();
         if (!url) return;
-        const radius = Math.max(0, Math.min(MAX_IMAGE_RADIUS, Number(getExtensionSettings()?.['st-lifesim']?.imageRadius ?? DEFAULT_IMAGE_RADIUS)));
+        const radius = getImageRadius();
         const desc = imageDescInput.value.trim();
         const descHtml = desc ? `<br><em class="slm-quick-image-desc">${escapeHtml(desc)}</em>` : '';
         await slashSend(`<img src="${escapeHtml(url)}" alt="이미지" class="slm-quick-image" style="border-radius:${radius}px">${descHtml}`);
@@ -529,7 +540,91 @@ export function renderVoiceMemoUI() {
     imageRow.appendChild(imageBtn);
     container.appendChild(imageRow);
 
+    // ── 유저 이미지 생성 (AI 이미지 생성 API) ──
+    const genImageTitle = document.createElement('h4');
+    genImageTitle.style.marginTop = '14px';
+    genImageTitle.textContent = '🎨 이미지 생성 (유저)';
+    container.appendChild(genImageTitle);
+
+    const genImageDesc = document.createElement('p');
+    genImageDesc.className = 'slm-desc';
+    genImageDesc.textContent = '이미지 설명을 입력하면 AI가 이미지를 생성하여 유저 메시지로 전송합니다.';
+    container.appendChild(genImageDesc);
+
+    const genImageRow = document.createElement('div');
+    genImageRow.className = 'slm-input-row';
+
+    const genImagePromptInput = document.createElement('input');
+    genImagePromptInput.className = 'slm-input';
+    genImagePromptInput.type = 'text';
+    genImagePromptInput.placeholder = '예: 카페에서 셀카, 음식 사진 등';
+
+    const genImageBtn = document.createElement('button');
+    genImageBtn.className = 'slm-btn slm-btn-primary slm-btn-sm';
+    genImageBtn.textContent = '🎨 생성';
+    genImageBtn.onclick = async () => {
+        const prompt = genImagePromptInput.value.trim();
+        if (!prompt) {
+            showToast('이미지 설명을 입력해주세요.', 'warn');
+            return;
+        }
+        genImageBtn.disabled = true;
+        genImageBtn.textContent = '⏳ 생성 중...';
+        try {
+            const imageUrl = await generateUserImage(prompt);
+            if (imageUrl) {
+                const radius = getImageRadius();
+                await slashSend(`<img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(prompt)}" class="slm-quick-image" style="border-radius:${radius}px">`);
+                genImagePromptInput.value = '';
+                showToast('이미지 생성 및 전송 완료', 'success', 1500);
+            } else {
+                showToast('이미지 생성에 실패했습니다. SD API가 활성화되어 있는지 확인해주세요.', 'error');
+            }
+        } catch (e) {
+            console.error('[ST-LifeSim] 유저 이미지 생성 오류:', e);
+            showToast('이미지 생성 실패: ' + e.message, 'error');
+        } finally {
+            genImageBtn.disabled = false;
+            genImageBtn.textContent = '🎨 생성';
+        }
+    };
+
+    genImageRow.appendChild(genImagePromptInput);
+    genImageRow.appendChild(genImageBtn);
+    container.appendChild(genImageRow);
+
     return container;
+}
+
+/**
+ * 유저가 이미지를 생성하여 전송한다 (이미지 생성 API 호출)
+ * @param {string} prompt - 이미지 생성 프롬프트
+ * @returns {Promise<string>} 생성된 이미지 URL 또는 빈 문자열
+ */
+async function generateUserImage(prompt) {
+    if (!prompt || !prompt.trim()) return '';
+    try {
+        const ctx = getContext();
+        if (!ctx) {
+            console.warn('[ST-LifeSim] 이미지 생성: 컨텍스트를 가져올 수 없습니다.');
+            return '';
+        }
+        const userName = ctx?.name1 || '';
+        const userAppearanceTags = getAppearanceTagsByName(userName) || getAppearanceTagsByName('{{user}}') || getExtensionSettings()?.['st-lifesim']?.characterAppearanceTags?.['{{user}}'] || '';
+        const finalPrompt = userAppearanceTags ? `${prompt.trim()}, ${String(userAppearanceTags).trim()}` : prompt.trim();
+        if (typeof ctx.executeSlashCommandsWithOptions === 'function') {
+            const result = await ctx.executeSlashCommandsWithOptions(`/sd quiet=true ${finalPrompt}`, { showOutput: false });
+            // result.pipe: 신규 SillyTavern API 반환값, result: 구버전 폴백
+            const resultStr = String(result?.pipe || result || '').trim();
+            if (resultStr && (resultStr.startsWith('http') || resultStr.startsWith('/') || resultStr.startsWith('data:'))) {
+                return resultStr;
+            }
+        }
+        return '';
+    } catch (e) {
+        console.warn('[ST-LifeSim] 유저 이미지 생성 API 호출 실패:', e);
+        return '';
+    }
 }
 
 /**
@@ -548,20 +643,22 @@ async function handleVoiceMemo(seconds, hint, aiMode = false) {
 
     try {
         if (aiMode) {
-            await slashGen(
-                `As ${charName}, send exactly one voice message in Korean. You must choose suitable duration and content yourself based on current context.
-Output only this HTML format:
-🎤 음성메시지 (M:SS)<br>[actual voice message content]`,
-                charName,
-            );
+            const tmpl = getExtensionSettings()?.['st-lifesim']?.messageTemplates?.voiceMemoAiPrompt;
+            const genPrompt = tmpl
+                ? tmpl.replace(/\{charName\}/g, charName)
+                : `As ${charName}, send exactly one voice message in Korean. You must choose suitable duration and content yourself based on current context.\nOutput only this HTML format:\n🎤 음성메시지 (M:SS)<br>[actual voice message content]`;
+            await slashGen(genPrompt, charName);
             showToast(`${charName}의 음성메시지 생성 완료`, 'success', 1500);
         } else {
             const hintText = hint ? escapeHtml(hint) : '(내용 없음)';
-            const voiceHtml = `🎤 음성메시지 (${timeStr})<br>${hintText}`;
+            const tmpl = getExtensionSettings()?.['st-lifesim']?.messageTemplates?.voiceMemo;
+            const voiceHtml = tmpl
+                ? tmpl.replace(/\{timeStr\}/g, timeStr).replace(/\{hint\}/g, hintText)
+                : `🎤 음성메시지 (${timeStr})<br>${hintText}`;
             await slashSend(voiceHtml);
             showToast('음성메시지 삽입 완료', 'success', 1500);
         }
     } catch (e) {
         showToast('음성메모 삽입 실패: ' + e.message, 'error');
     }
-}
+            }
