@@ -48,6 +48,7 @@ const MODEL_KEY_BY_SOURCE = {
  * @property {string} id
  * @property {string} name
  * @property {string} [displayName]
+ * @property {string} [subName] - 다른 언어 이름 (이미지 생성 시 이름 인식에 사용)
  * @property {string} avatar
  * @property {string} description
  * @property {string} relationToUser
@@ -81,6 +82,23 @@ function saveContacts(contacts, binding = 'chat') {
 
 function getContactDisplayName(contact) {
     return String(contact?.displayName || contact?.name || '').trim();
+}
+
+/**
+ * 유저 외모/서브이름 글로벌 프로필을 불러온다 (캐릭터 전환 시에도 유지)
+ * @returns {{ appearanceTags?: string, subName?: string }}
+ */
+function loadGlobalUserProfile() {
+    return loadData('user-profile', {}, 'global');
+}
+
+/**
+ * 유저 외모/서브이름 글로벌 프로필을 저장한다
+ * @param {{ appearanceTags?: string, subName?: string }} data
+ */
+function saveGlobalUserProfile(data) {
+    const existing = loadGlobalUserProfile();
+    saveData('user-profile', { ...existing, ...data }, 'global');
 }
 
 /**
@@ -150,6 +168,7 @@ function ensureCharContact() {
  * {{user}} 연락처를 자동으로 추가한다 (character 바인딩, 외모 태그 전용)
  * - 선통화/SNS 등 자동 트리거에서는 제외되어야 한다
  * - 삭제 버튼 없어야 하며 캐릭터 바인딩이어야 한다
+ * - 외모 태그/서브이름은 글로벌 저장소에서 동기화하여 캐릭터 전환 시에도 유지
  */
 function ensureUserContact() {
     const ctx = getContext();
@@ -160,9 +179,17 @@ function ensureUserContact() {
     const contacts = loadContacts('character');
     const existing = contacts.find(c => c.isUserAuto || c.name === userName);
     const userAvatar = document.querySelector('#user_avatar_block .avatar.selected img')?.getAttribute('src') || '';
+    const globalProfile = loadGlobalUserProfile();
     if (existing) {
         existing.name = userName;
         existing.avatar = existing.avatar || userAvatar;
+        // 글로벌 프로필에서 외모 태그/서브이름 동기화 (로컬 값이 없을 때)
+        if (!existing.appearanceTags && globalProfile.appearanceTags) {
+            existing.appearanceTags = globalProfile.appearanceTags;
+        }
+        if (!existing.subName && globalProfile.subName) {
+            existing.subName = globalProfile.subName;
+        }
         existing.isUserAuto = true;
         existing.binding = 'character';
         saveContacts(contacts, 'character');
@@ -173,6 +200,7 @@ function ensureUserContact() {
         id: generateId(),
         name: userName,
         displayName: '',
+        subName: globalProfile.subName || '',
         avatar: userAvatar,
         description: '유저 (플레이어)',
         relationToUser: '본인',
@@ -180,7 +208,7 @@ function ensureUserContact() {
         personality: '',
         phone: '',
         tags: [],
-        appearanceTags: '',
+        appearanceTags: globalProfile.appearanceTags || '',
         binding: 'character',
         isUserAuto: true,
     });
@@ -213,15 +241,21 @@ export function initContacts() {
     // 채팅 로드 시 {{char}} 자동 추가
     const ctx = getContext();
     const resolvedEventTypes = ctx?.event_types || ctx?.eventTypes;
+    const syncAutoContacts = () => {
+        ensureCharContact();
+        ensureUserContact();
+    };
     if (ctx?.eventSource && resolvedEventTypes?.CHAT_CHANGED) {
-        ctx.eventSource.on(resolvedEventTypes.CHAT_CHANGED, () => {
-            ensureCharContact();
-            ensureUserContact();
-        });
+        ctx.eventSource.on(resolvedEventTypes.CHAT_CHANGED, syncAutoContacts);
+    }
+    if (ctx?.eventSource && resolvedEventTypes?.CHARACTER_CHANGED) {
+        ctx.eventSource.on(resolvedEventTypes.CHARACTER_CHANGED, syncAutoContacts);
+    }
+    if (ctx?.eventSource && resolvedEventTypes?.CHARACTER_SELECTED) {
+        ctx.eventSource.on(resolvedEventTypes.CHARACTER_SELECTED, syncAutoContacts);
     }
     // 즉시도 한번 실행
-    ensureCharContact();
-    ensureUserContact();
+    syncAutoContacts();
 }
 
 /**
@@ -414,6 +448,7 @@ function openContactDetailPopup(contact) {
     fields.className = 'slm-contact-detail-fields';
 
     const fieldDefs = [
+        { label: '다른 언어 이름', value: contact.subName },
         { label: '관계', value: contact.relationToUser },
         { label: '성격/말투', value: contact.personality },
         { label: '외관 태그', value: contact.appearanceTags },
@@ -454,6 +489,7 @@ function openContactDialog(existing, defaultBinding, onSave) {
 
     const fields = {
         name: createFormField(wrapper, existing?.isCharAuto ? '표시 이름 *' : (existing?.isUserAuto ? '표시 이름' : '이름 *'), 'text', existing?.displayName || existing?.name || ''),
+        subName: createFormField(wrapper, '🌐 다른 언어 이름', 'text', existing?.subName || ''),
         avatar: createFormField(wrapper, '프로필 이미지 URL', 'url', existing?.avatar || ''),
         description: createFormField(wrapper, '설명', 'text', existing?.description || ''),
         relationToUser: createFormField(wrapper, '{{user}}와의 관계 *', 'text', existing?.relationToUser || ''),
@@ -461,6 +497,7 @@ function openContactDialog(existing, defaultBinding, onSave) {
         personality: createFormField(wrapper, '성격/말투', 'text', existing?.personality || ''),
         appearanceTags: createFormField(wrapper, '🏷️ 외관 태그 (이미지 생성용)', 'text', existing?.appearanceTags || ''),
     };
+    fields.subName.placeholder = '예: 유레오, ユレオ (이미지 생성 시 이 이름도 인식됩니다)';
     fields.appearanceTags.placeholder = '예: long hair, school uniform, warm smile';
     if (existing?.isCharAuto) {
         fields.name.disabled = true;
@@ -545,6 +582,7 @@ function openContactDialog(existing, defaultBinding, onSave) {
             id: existing?.id || generateId(),
             name: canonicalName,
             displayName,
+            subName: fields.subName.value.trim(),
             avatar: fields.avatar.value.trim(),
             description: (isCharAuto || isUserAuto) ? (existing?.description || '') : fields.description.value.trim(),
             relationToUser: isUserAuto ? (existing?.relationToUser || '본인') : relationToUser,
@@ -567,6 +605,20 @@ function openContactDialog(existing, defaultBinding, onSave) {
             saveContacts(sourceContacts, sourceBinding);
         }
         saveContacts(targetContacts, targetBinding);
+
+        // 유저 자동 연락처: 편집 내용은 현재 캐릭터(페르소나)에만 저장
+        // 글로벌 프로필 동기화를 하지 않으므로 다른 페르소나에 영향을 주지 않는다
+
+        // 채팅 바인딩 연락처의 서브이름을 캐릭터 바인딩 연락처에도 동기화
+        if (!isUserAuto && !isCharAuto && targetBinding === 'chat' && data.subName) {
+            const charContacts = loadContacts('character');
+            const charContact = charContacts.find(c => c.name === canonicalName);
+            if (charContact && charContact.subName !== data.subName) {
+                charContact.subName = data.subName;
+                saveContacts(charContacts, 'character');
+            }
+        }
+
         close();
         onSave();
         showToast(isEdit ? '연락처 수정 완료' : '연락처 추가 완료', 'success');
@@ -745,13 +797,116 @@ export function getContacts(binding = 'chat') {
 
 /**
  * 이름으로 연락처의 외관 태그를 가져온다.
- * chat 바인딩과 character 바인딩 모두 검색한다.
+ * chat 바인딩과 character 바인딩 모두 검색하고,
+ * 연락처에 없으면 characterAppearanceTags 설정도 확인한다.
  * @param {string} name - 캐릭터/유저 이름
  * @returns {string} 외관 태그 문자열 (없으면 빈 문자열)
  */
 export function getAppearanceTagsByName(name) {
     if (!name) return '';
     const allContacts = [...loadContacts('character'), ...loadContacts('chat')];
-    const contact = allContacts.find(c => c.name === name || c.displayName === name);
-    return String(contact?.appearanceTags || '').trim();
-                         }
+    const contact = allContacts.find(c => c.name === name || c.displayName === name || c.subName === name);
+    const fromContact = String(contact?.appearanceTags || '').trim();
+    if (fromContact) return fromContact;
+    // 연락처에 외관 태그가 없으면 characterAppearanceTags 설정에서 확인
+    const ext = getExtensionSettings()?.['st-lifesim'];
+    const fromSettings = String(ext?.characterAppearanceTags?.[name] || '').trim();
+    return fromSettings;
+}
+
+/**
+ * 등록된 모든 연락처의 외모태그 변수 맵을 반환한다.
+ * 예: { "kariv": "long hair, blue eyes, ..." }
+ * 변수 형식: {{appearanceTag:name}}
+ * @returns {{ [name: string]: string }}
+ */
+export function buildAppearanceTagVariableMap() {
+    const allContacts = [...loadContacts('character'), ...loadContacts('chat')];
+    const map = {};
+    for (const c of allContacts) {
+        const name = String(c.name || '').trim();
+        if (!name) continue;
+        const tags = getAppearanceTagsByName(name);
+        if (tags) map[name] = tags;
+        const displayName = String(c.displayName || '').trim();
+        if (displayName && displayName !== name) {
+            if (tags) map[displayName] = tags;
+        }
+        const subName = String(c.subName || '').trim();
+        if (subName && subName !== name && subName !== displayName) {
+            if (tags) map[subName] = tags;
+        }
+    }
+    return map;
+}
+
+/**
+ * 텍스트 내의 {{appearanceTag:name}} 변수를 실제 외모태그로 치환한다.
+ * @param {string} text
+ * @returns {string}
+ */
+export function resolveAppearanceTagVariables(text) {
+    if (!text || typeof text !== 'string') return text || '';
+    const varMap = buildAppearanceTagVariableMap();
+    return text.replace(/\{\{appearanceTag:([^}]+)\}\}/gi, (match, name) => {
+        const trimmed = name.trim();
+        if (varMap[trimmed]) return varMap[trimmed];
+        // case-insensitive fallback
+        const lowerKey = Object.keys(varMap).find(k => k.toLowerCase() === trimmed.toLowerCase());
+        return lowerKey ? varMap[lowerKey] : match;
+    });
+}
+
+function isAsciiToken(name) {
+    return /^[a-z0-9_]+$/i.test(name);
+}
+
+function isNameMentioned(textLower, name) {
+    const normalized = String(name || '').trim().toLowerCase();
+    if (!normalized) return false;
+    if (isAsciiToken(normalized)) {
+        const re = new RegExp(`(^|[^a-z0-9_])${normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9_]|$)`, 'i');
+        return re.test(textLower);
+    }
+    return textLower.includes(normalized);
+}
+
+/**
+ * 프롬프트에서 언급된 연락처 이름을 추적하여 외관 태그 목록을 반환한다.
+ * 연락처의 appearanceTags와 characterAppearanceTags 설정 양쪽을 확인한다.
+ * @param {string} text
+ * @param {{ includeNames?: string[] }} [options]
+ * @returns {string[]}
+ */
+export function collectAppearanceTagsFromText(text, options = {}) {
+    const allContacts = [...loadContacts('character'), ...loadContacts('chat')];
+    const mentionSource = String(text || '').toLowerCase();
+    const includeNames = Array.isArray(options.includeNames) ? options.includeNames : [];
+    const tags = [];
+    const seen = new Set();
+
+    const pushTag = (tag) => {
+        const clean = String(tag || '').trim();
+        if (!clean || seen.has(clean)) return;
+        seen.add(clean);
+        tags.push(clean);
+    };
+
+    includeNames.forEach((name) => pushTag(getAppearanceTagsByName(name)));
+
+    const checkedNames = new Set(includeNames.map(n => String(n || '').trim().toLowerCase()));
+
+    allContacts.forEach((contact) => {
+        const namesToCheck = [contact?.name, contact?.displayName, contact?.subName]
+            .map(v => String(v || '').trim())
+            .filter(Boolean);
+        if (namesToCheck.some(n => checkedNames.has(n.toLowerCase()))) return;
+        if (namesToCheck.some((name) => isNameMentioned(mentionSource, name))) {
+            // getAppearanceTagsByName checks both contact record and settings fallback
+            const contactName = contact?.name || contact?.displayName || '';
+            pushTag(getAppearanceTagsByName(contactName));
+        }
+    });
+
+    return tags;
+}
