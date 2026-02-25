@@ -123,7 +123,7 @@ function ensureCharContact() {
         existing.name = charName;
         existing.avatar = existing.avatar || syncedAvatar;
         existing.description = existing.description || syncedDescription;
-        existing.personality = existing.personality || syncedPersonality;
+        existing.personality = syncedPersonality || existing.personality;
         existing.isCharAuto = true;
         existing.binding = 'character';
         saveContacts(contacts, 'character');
@@ -215,6 +215,11 @@ function ensureUserContact() {
     saveContacts(contacts, 'character');
 }
 
+function refreshAutoContacts() {
+    ensureCharContact();
+    ensureUserContact();
+}
+
 /**
  * 연락처 모듈을 초기화한다
  */
@@ -242,8 +247,7 @@ export function initContacts() {
     const ctx = getContext();
     const resolvedEventTypes = ctx?.event_types || ctx?.eventTypes;
     const syncAutoContacts = () => {
-        ensureCharContact();
-        ensureUserContact();
+        refreshAutoContacts();
     };
     if (ctx?.eventSource && resolvedEventTypes?.CHAT_CHANGED) {
         ctx.eventSource.on(resolvedEventTypes.CHAT_CHANGED, syncAutoContacts);
@@ -300,8 +304,16 @@ function buildContactsContent() {
     aiAddBtn.className = 'slm-btn slm-btn-secondary slm-btn-sm';
     aiAddBtn.textContent = '🤖 AI 생성';
     aiAddBtn.onclick = () => openAiContactDialog('chat', renderList);
+    const refreshBtn = document.createElement('button');
+    refreshBtn.className = 'slm-btn slm-btn-secondary slm-btn-sm';
+    refreshBtn.textContent = '🔄 갱신';
+    refreshBtn.onclick = () => {
+        refreshAutoContacts();
+        renderList();
+    };
     actionRow.appendChild(addBtn);
     actionRow.appendChild(aiAddBtn);
+    actionRow.appendChild(refreshBtn);
     wrapper.appendChild(actionRow);
 
     // 연락처 목록
@@ -909,4 +921,4 @@ export function collectAppearanceTagsFromText(text, options = {}) {
     });
 
     return tags;
-}
+            }
