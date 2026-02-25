@@ -31,11 +31,11 @@ const SNS_POST_TEXT_MAX = 280;
 const SNS_IMAGE_DESC_MAX = 220;
 const SNS_RANDOM_LIKES_BONUS_MAX = 30;
 const DEFAULT_SNS_PROMPTS = {
-    postChar: 'Write exactly one SNS post for {{charName}}. Use natural language and tone that fit {{charName}}\'s nationality/background, personality, and current situation. Keep it 1-2 casual daily-life sentences. Avoid repeating topics or phrasing from recent posts. Do not include hashtags, image tags, quotation marks, other people\'s reactions/comments, or [caption: ...] blocks. Output only {{charName}}\'s own post text.',
-    postContact: 'Write exactly one SNS post for {{authorName}}. Personality: {{personality}}. Use natural language and tone that fit {{authorName}}\'s nationality/background and daily context. Keep it 1-2 casual daily-life sentences and avoid repeating recent topics/phrasing. Do not include hashtags, image tags, quotation marks, other people\'s reactions/comments, or [caption: ...] blocks. Output only {{authorName}}\'s own post text.',
+    postChar: 'Write exactly one SNS post as {{charName}}.\n\n* Before writing, internalize these:\n- {{charName}}\'s personality, speech patterns, and worldview based on profile.\n- Extract the setting and genre from {{charName}}\'s profile itself — it could be modern, medieval fantasy, zombie apocalypse, sci-fi, or anything else. Let that world shape what feels natural to say and how to say it\n- What {{charName}} would actually care about or casually mention on a given day\n--------\n* {{charName}}\'s profile:\n{{personality}}\n--------\n* System Rules:\n- 1–4 sentences, casual and off-the-cuff, like a real personal post\n- Write in the voice and language style that fits {{charName}}\'s background and personality\n- If {{charName}}\'s personality strongly suggests they\'d use emojis, you may include them — otherwise, don\'t\n- No hashtags, no image tags, no quotation marks, no other characters\' reactions, no [caption: ...] blocks\n- Word choice, references, and tone must stay true to the detected world — never bleed in elements from the wrong setting\n- Don\'t be stiff or formal. This is a glimpse into {{charName}}\'s actual inner life, not a public announcement\n\n* System Note\n- Output only {{charName}}\'s post text. Nothing else.\n- Please comply with the output language.\n* This is a post aimed at an unspecified number of people. It is not a 1:1 session to communicate with {{user}}.',
+    postContact: 'Write exactly one SNS post as {{authorName}}.\n\n* Before writing, internalize these:\n- {{authorName}}\'s personality, speech patterns, and worldview based on profile.\n- Extract the setting and genre from {{authorName}}\'s profile itself — it could be modern, medieval fantasy, zombie apocalypse, sci-fi, or anything else. Let that world shape what feels natural to say and how to say it\n- What {{authorName}} would actually care about or casually mention on a given day\n-------\n* {{authorName}}\'s profile:\n{{personality}}\n-------\n* System Rules:\n- 1–2 sentences, casual and off-the-cuff, like a real personal post\n- Write in the voice and language style that fits {{authorName}}\'s background and personality\n- If {{authorName}}\'s personality strongly suggests they\'d use emojis, you may include them — otherwise, don\'t\n- No hashtags, no image tags, no quotation marks, no other characters\' reactions, no [caption: ...] blocks\n- Word choice, references, and tone must stay true to the detected world — never bleed in elements from the wrong setting\n- Don\'t be stiff or formal. This is a glimpse into {{authorName}}\'s actual inner life, not a public announcement\n\n* System Note\n- Output only {{authorName}}\'s post text. Nothing else.\n- Please comply with the output language.',
     imageDescription: 'For {{authorName}}\'s SNS post "{{postContent}}", write exactly one short sentence describing the attached image. Mention only visible content. Do not use hashtags, quotes, parentheses, or any "caption:" prefix.',
-    reply: 'Write exactly one SNS reply for this thread.\nPost author: {{postAuthorName}} ({{postAuthorHandle}})\nPost: "{{postContent}}"\nTarget comment author: {{commentAuthorName}} ({{commentAuthorHandle}})\nTarget comment: "{{commentText}}"\nReply author: {{replyAuthorName}} ({{replyAuthorHandle}})\nRules: one sentence only from {{replyAuthorName}}\'s perspective; use only fixed @handles if needed; use natural language fitting {{replyAuthorName}}\'s background; no explanations, quotes, or hashtags. Personality hint: {{replyPersonality}}.',
-    extraComment: 'Write exactly one additional SNS comment for this post.\nPost author: {{postAuthorName}} ({{postAuthorHandle}})\nPost: "{{postContent}}"\nComment author: {{extraAuthorName}} ({{extraAuthorHandle}})\nRules: one short sentence from {{extraAuthorName}}\'s perspective; use only fixed @handles if needed; use natural language fitting {{extraAuthorName}}\'s background; no explanations, quotes, or hashtags. Personality hint: {{extraPersonality}}.',
+    reply: 'Write exactly one SNS reply for this thread.\nPost author: {{postAuthorName}} ({{postAuthorHandle}})\nPost: "{{postContent}}"\nTarget comment author: {{commentAuthorName}} ({{commentAuthorHandle}})\nTarget comment: "{{commentText}}"\nReply author: {{replyAuthorName}} ({{replyAuthorHandle}})\nRules: one sentence only from {{replyAuthorName}}\'s perspective; use only fixed @handles if needed; use natural language fitting {{replyAuthorName}}\'s background; no explanations, quotes, or hashtags. Personality hint: {{replyPersonality}}. It should be written vividly, fitting the characteristics of each character.',
+    extraComment: 'Write exactly one additional SNS comment for this post.\nPost author: {{postAuthorName}} ({{postAuthorHandle}})\nPost: "{{postContent}}"\nComment author: {{extraAuthorName}} ({{extraAuthorHandle}})\nRules: one short sentence from {{extraAuthorName}}\'s perspective; use only fixed @handles if needed; use natural language fitting {{extraAuthorName}}\'s background; no explanations, quotes, or hashtags. Personality hint: {{extraPersonality}}. It should be written vividly, fitting the characteristics of each character.',
 };
 const SNS_PRESET_BINDING = 'character';
 const MODEL_KEY_BY_SOURCE = {
@@ -197,6 +197,15 @@ function inferModelSettingKey(source) {
 
 function applyPromptTemplate(template, vars) {
     return String(template || '').replace(/\{\{(\w+)}}/g, (_, key) => String(vars?.[key] ?? ''));
+}
+
+function buildSnsImageInputPrompt(customTemplate, authorName, postContent) {
+    if (!customTemplate) return `${authorName}'s social media photo post: "${postContent}"`;
+    const authorAppearanceTags = String(getAppearanceTagsByName(authorName) || '').trim();
+    return customTemplate
+        .replace(/\{authorName\}/g, authorName)
+        .replace(/\{appearanceTags\}/g, authorAppearanceTags)
+        .replace(/\{postContent\}/g, postContent);
 }
 
 function enforceSnsLanguage(prompt, language) {
@@ -496,15 +505,18 @@ export async function triggerNpcPosting() {
     const postingEnabled = loadPostingEnabledMap();
 
     const seenContactNames = new Set();
-    const contacts = [...getContacts('chat'), ...getContacts(getDefaultBinding())]
+    const contacts = [...getContacts('chat'), ...getContacts('character'), ...getContacts(getDefaultBinding())]
         .filter((c) => {
             if (!c?.name || seenContactNames.has(c.name)) return false;
             seenContactNames.add(c.name);
             return true;
         });
+    // charName의 연락처에서 description + personality를 결합하여 가져온다
+    const charContact = [...getContacts('character'), ...getContacts('chat')].find(c => c?.name === charName);
+    const charPersonality = [charContact?.description, charContact?.personality].filter(Boolean).join(' / ') || '';
     const candidates = [
-        { name: charName, personality: '', isChar: true },
-        ...contacts.map(c => ({ name: c.name, personality: c.personality, isChar: false })),
+        { name: charName, personality: charPersonality, isChar: true },
+        ...contacts.map(c => ({ name: c.name, personality: [c.description, c.personality].filter(Boolean).join(' / '), isChar: false })),
     ].filter(c => c.name !== userName && postingEnabled[c.name] !== false);
 
     if (candidates.length === 0) return;
@@ -555,7 +567,7 @@ export async function triggerNpcPosting() {
             // 통합 파이프라인: generateImageTags() → Image API
             // 게시글 내용에서 시각적 장면을 유추할 수 있도록 작성자 정보 포함
             const allContactsList = [...getContacts('character'), ...getContacts('chat')];
-            const imageInputPrompt = `${pick.name}'s social media photo post: "${postContent}"`;
+            const imageInputPrompt = buildSnsImageInputPrompt(promptSettings.snsImagePrompt, pick.name, postContent);
             const additionalPrompt = String(getExtensionSettings()?.['st-lifesim']?.tagGenerationAdditionalPrompt || '').trim();
             const tagResult = await generateImageTags(imageInputPrompt, {
                 includeNames: [pick.name],
@@ -1328,18 +1340,20 @@ async function runDeferredCommentGeneration({ postId, commentId, text, userName,
         const userHandle = getAuthorHandle(userName, userIds);
         const charName = ctx?.name2 || '';
         const contacts = getContacts('chat');
-        const postAuthorContact = contacts.find(c => c?.name === p.authorName);
+        const allContactsForPersonality = [...getContacts('character'), ...contacts];
+        const postAuthorContact = allContactsForPersonality.find(c => c?.name === p.authorName);
         const replyAuthorCandidates = [];
         if (p.authorName && p.authorName !== userName) {
-            replyAuthorCandidates.push({ name: p.authorName, personality: postAuthorContact?.personality || '' });
+            replyAuthorCandidates.push({ name: p.authorName, personality: [postAuthorContact?.description, postAuthorContact?.personality].filter(Boolean).join(' / ') || '' });
         }
         if (charName && charName !== userName && charName !== p.authorName) {
-            replyAuthorCandidates.push({ name: charName, personality: '' });
+            const charContact = allContactsForPersonality.find(c => c?.name === charName);
+            replyAuthorCandidates.push({ name: charName, personality: [charContact?.description, charContact?.personality].filter(Boolean).join(' / ') || '' });
         }
         contacts.forEach(c => {
             if (!c?.name || c.name === userName || c.name === p.authorName) return;
             if (!replyAuthorCandidates.find(existing => existing.name === c.name)) {
-                replyAuthorCandidates.push({ name: c.name, personality: c.personality || '' });
+                replyAuthorCandidates.push({ name: c.name, personality: [c.description, c.personality].filter(Boolean).join(' / ') || '' });
             }
         });
 
@@ -1396,7 +1410,7 @@ async function runDeferredCommentGeneration({ postId, commentId, text, userName,
                     postContent: safePostContent,
                     extraAuthorName: picker.name,
                     extraAuthorHandle: pickerHandle,
-                    extraPersonality: picker.personality || '평범하고 자연스러운 말투',
+                    extraPersonality: [picker.description, picker.personality].filter(Boolean).join(' / ') || '평범하고 자연스러운 말투',
                 }), pickerLanguage);
                 const generated = await generateSnsText(ctx, contactPrompt, picker.name);
                 if (generated) {
@@ -1567,7 +1581,8 @@ function openWritePostDialog(onSave) {
 
             try {
                 const allContactsList = [...getContacts('character'), ...getContacts('chat')];
-                const imageInputPrompt = `${authorName}'s social media photo post: "${userImageDesc}"`;
+                const userPromptSettings = getSnsPromptSettings();
+                const imageInputPrompt = buildSnsImageInputPrompt(userPromptSettings.snsImagePrompt, authorName, userImageDesc);
                 const additionalPrompt = String(getExtensionSettings()?.['st-lifesim']?.tagGenerationAdditionalPrompt || '').trim();
                 const tagResult = await generateImageTags(imageInputPrompt, {
                     includeNames: [authorName].filter(Boolean),
@@ -1774,10 +1789,53 @@ function openAvatarSettingsDialog(onUpdate) {
     wrapper.appendChild(presetManageBtn);
 
     wrapper.appendChild(Object.assign(document.createElement('hr'), { className: 'slm-hr' }));
+    const descRow = document.createElement('div');
+    descRow.style.display = 'flex';
+    descRow.style.alignItems = 'center';
+    descRow.style.gap = '8px';
+    descRow.style.marginBottom = '6px';
     const desc = document.createElement('div');
     desc.className = 'slm-label';
     desc.textContent = '연락처에 등록된 인물을 SNS 프로필로 자동 동기화합니다. 이름을 눌러 세부 옵션을 설정하세요.';
-    wrapper.appendChild(desc);
+    descRow.appendChild(desc);
+    const refreshBtn = document.createElement('button');
+    refreshBtn.className = 'slm-btn slm-btn-secondary slm-btn-sm';
+    refreshBtn.textContent = '🔄 갱신';
+    refreshBtn.title = '현재 연락처/페르소나에서 프로필을 다시 동기화합니다';
+    refreshBtn.onclick = () => {
+        const freshContacts = [...getContacts('character'), ...getContacts('chat')];
+        const freshUserName = getContext()?.name1 || 'user';
+        const freshCharName = getContext()?.name2 || '';
+        const freshCharProfile = freshCharName
+            ? [{ name: freshCharName, avatar: avatars[freshCharName] || getBuiltinCharAvatarUrl(), personality: 'char' }]
+            : [];
+        const freshProfiles = [{ name: freshUserName, avatar: avatars[freshUserName] || getBuiltinUserAvatarUrl(), personality: 'user' }, ...freshCharProfile, ...freshContacts]
+            .filter((c, i, arr) => arr.findIndex(x => x.name === c.name) === i);
+        // 새 프로필에 없는 이전 항목 제거
+        const freshNames = new Set(freshProfiles.map(c => c.name));
+        Object.keys(userIds).forEach(k => { if (!freshNames.has(k)) delete userIds[k]; });
+        Object.keys(postingEnabled).forEach(k => { if (!freshNames.has(k)) delete postingEnabled[k]; });
+        // 새 프로필 동기화
+        freshProfiles.forEach(c => {
+            if (!userIds[c.name]) userIds[c.name] = makeDefaultHandle(c.name);
+            if (c.avatar && !avatars[c.name]) avatars[c.name] = c.avatar;
+            if (c.name !== freshUserName && postingEnabled[c.name] == null) postingEnabled[c.name] = true;
+            if (!['ko', 'en', 'ja', 'zh'].includes(authorLanguages[c.name])) authorLanguages[c.name] = 'en';
+            if (authorMinLikes[c.name] == null || Number.isNaN(Number(authorMinLikes[c.name]))) authorMinLikes[c.name] = 0;
+        });
+        saveUserIds(userIds);
+        saveAvatars(avatars);
+        savePostingEnabledMap(postingEnabled);
+        saveAuthorLanguages(authorLanguages);
+        saveAuthorMinLikesMap(authorMinLikes);
+        // allProfiles 갱신 후 렌더링
+        allProfiles.length = 0;
+        freshProfiles.forEach(p => allProfiles.push(p));
+        renderContactList();
+        showToast('SNS 프로필 갱신 완료', 'success', 1500);
+    };
+    descRow.appendChild(refreshBtn);
+    wrapper.appendChild(descRow);
 
     const userIds = loadUserIds();
     const avatars = loadAvatars();
@@ -1941,4 +1999,4 @@ function openAvatarSettingsDialog(onUpdate) {
         className: 'slm-sub-panel',
         onBack: () => openSnsPopup(),
     });
-}
+        }
