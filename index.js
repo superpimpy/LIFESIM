@@ -2657,12 +2657,48 @@ function hasExplicitImageIntentAroundLatestMessage() {
         /v\s*sign|peace\s*sign|브이.*했|윙크.*했|wink|미소.*지었|smiled/i,
         /찍어\s*봄|찍어봤|한\s*장.*찍|잠깐.*봐|이거\s*봐/i,
     ];
-    return recentMessages.some((msg) => {
+        // Existing check: any message independently matches explicit intent
+    if (recentMessages.some((msg) => {
         const text = msg?.mes;
         if (!text) return false;
         const patterns = msg?.is_user ? userRequestPatterns : charSendIntentPatterns;
         return patterns.some((re) => re.test(text));
-    });
+    })) return true;
+
+    // ── NEW: AI offered to send an image → user agreed ──
+    // Detect when the AI proposes/offers to send an image (question form)
+    // and the user responds with a short affirmative answer.
+    const charOfferPatterns = [
+        // Korean: image keyword + offer/question ending (줄까, 볼까, 할까)
+        /(?:사진|이미지|셀카|인증샷)[\s\S]*?(?:줄까|볼까|할까)/i,
+        // Korean: "사진이라도" (casual offer implying sending a photo)
+        /사진이라도/i,
+        // English: offer/question form + image keyword
+        /(?:shall|should|want\s+me\s+to|do\s+you\s+want)[\s\S]*?(?:send|show|take)[\s\S]*?(?:photo|picture|pic|image|selfie)/i,
+        /(?:photo|picture|pic|image|selfie)[\s\S]*?(?:shall\s+I|want\s+me\s+to|should\s+I)/i,
+        /wanna\s+see\s+(?:a\s+)?(?:photo|picture|pic|image|selfie)/i,
+    ];
+    const userAgreementRe = /^\s*(?:응|웅|어|그래|좋아|네|예|ㅇㅇ|ㅇ|오키|오케이|고|ㄱㄱ|ㄱ|yes|yeah|yep|yup|ok|okay|sure|please|그럼|당연|물론|해줘|해봐|gogo|당근|좋지|ㅇㅋ|보내|보내줘|보내봐|보여줘|보여봐|응응|그래그래|좋아좋아)[\s.!~?ㅋㅎ]*$/i;
+    // Short messages only — prevents long user messages from being misidentified as simple agreement
+    const MAX_AGREEMENT_LENGTH = 30;
+
+    for (let i = 0; i < recentMessages.length - 1; i++) {
+        const msg = recentMessages[i];
+        if (msg?.is_user) continue;
+        const text = String(msg?.mes || '');
+        if (!charOfferPatterns.some(re => re.test(text))) continue;
+        // AI offered an image — check if any subsequent user message is an agreement
+        for (let j = i + 1; j < recentMessages.length; j++) {
+            const nextMsg = recentMessages[j];
+            if (!nextMsg?.is_user) continue;
+            const nextText = String(nextMsg?.mes || '').trim();
+            if (nextText.length <= MAX_AGREEMENT_LENGTH && userAgreementRe.test(nextText)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 function isAsciiNameToken(name) {
@@ -2743,8 +2779,20 @@ function syncQuickSendButtons() {
 // 메신저 이미지 프롬프트 주입 태그
 const MSG_IMAGE_INJECT_TAG = 'st-lifesim-msg-image';
 
-// <pic prompt="..."> 패턴 감지 정규식
-const PIC_TAG_REGEX = /<pic\s[^>]*?prompt="([^"]*)"[^>]*?\/?>/gi;
+// <pic prompt="..."> 패턴 감지 정규식 (double quotes, single quotes, 및 smart/curly quotes 지원)
+const PIC_TAG_REGEX = /<pic\s[^>]*?prompt\s*=\s*(?:"([^"]*)"|'([^']*)')[^>]*?\/?>/gi;
+
+/**
+ * AI 모델이 종종 출력하는 유니코드 스마트/커리 인용부호를 ASCII 인용부호로 정규화한다.
+ * 이를 통해 <pic prompt="..."> 정규식이 올바르게 매칭될 수 있도록 한다.
+ * @param {string} text
+ * @returns {string}
+ */
+function normalizeQuotesForPicTag(text) {
+    return text
+        .replace(/[\u201C\u201D\u201E\u201F]/g, '"')   // U+201C " U+201D " U+201E „ U+201F ‟
+        .replace(/[\u2018\u2019\u201A\u201B]/g, "'");   // U+2018 ' U+2019 ' U+201A ‚ U+201B ‛
+}
 
 /**
  * 메신저 이미지 모드에 따라 AI 프롬프트 주입을 업데이트한다
@@ -2802,6 +2850,50 @@ async function generateMessageImageViaApi(imagePrompt) {
     try {
         const ctx = getContext();
         if (!ctx) return '';
+        const settings = getSettings();
+        const externalApiUrl = String(settings?.snsExternalApiUrl || '').trim();
+        const externalApiTimeoutMs = Math.max(1000, Math.min(60000, Number(settings?.snsExternalApiTimeoutMs) || 12000));
+        if (externalApiUrl) {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), externalApiTimeoutMs);
+            try {
+                const headers = { 'Content-Type': 'application/json' };
+                if (typeof ctx.getRequestHeaders === 'function') {
+                    Object.assign(headers, ctx.getRequestHeaders());
+                }
+                const response = await fetch(externalApiUrl, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({ prompt: imagePrompt, module: 'st-lifesim-messenger-image' }),
+                    signal: controller.signal,
+                });
+                if (response.ok) {
+                    const rawText = await response.text();
+                    let resultStr = String(rawText || '').trim();
+                    try {
+                        const json = JSON.parse(rawText || 'null');
+                        if (typeof json === 'string') resultStr = json.trim();
+                        else if (typeof json?.url === 'string') resultStr = json.url.trim();
+                        else if (typeof json?.imageUrl === 'string') resultStr = json.imageUrl.trim();
+                        else if (typeof json?.text === 'string') resultStr = json.text.trim();
+                    } catch { /* non-JSON 응답은 그대로 사용 */ }
+                    if (resultStr && (resultStr.startsWith('http') || resultStr.startsWith('/') || resultStr.startsWith('data:'))) {
+                        if (isUrlAlreadyInChat(resultStr, ctx)) {
+                            console.warn('[ST-LifeSim] 외부 API 이미지 URL이 이미 채팅에 존재합니다. 재사용 방지를 위해 거부합니다.');
+                            return '';
+                        }
+                        return resultStr;
+                    }
+                    console.warn('[ST-LifeSim] 외부 API가 유효한 이미지 URL을 반환하지 않음');
+                } else {
+                    console.warn('[ST-LifeSim] 메신저 이미지 외부 API 응답 오류:', response.status);
+                }
+            } catch (error) {
+                console.warn('[ST-LifeSim] 메신저 이미지 외부 API 호출 실패, /sd로 폴백:', error);
+            } finally {
+                clearTimeout(timer);
+            }
+        }
         if (typeof ctx.executeSlashCommandsWithOptions === 'function') {
             const result = await ctx.executeSlashCommandsWithOptions(`/sd quiet=true ${imagePrompt}`, { showOutput: false });
             const resultStr = String(result?.pipe || result || '').trim();
@@ -2833,9 +2925,9 @@ async function applyCharacterImageDisplayMode() {
     if (!ctx) return;
     const lastMsg = ctx.chat?.[ctx.chat.length - 1];
     if (!lastMsg || lastMsg.is_user) return;
-    const mes = String(lastMsg.mes || '');
+    const mes = normalizeQuotesForPicTag(String(lastMsg.mes || ''));
 
-    // <pic prompt="..."> 태그가 있는지 확인
+    // <pic prompt="..."> 태그가 있는지 확인 (smart/curly quotes는 정규화 후 매칭)
     const picMatches = [...mes.matchAll(PIC_TAG_REGEX)];
     if (picMatches.length === 0) return;
 
@@ -2860,7 +2952,7 @@ async function applyCharacterImageDisplayMode() {
             .join('\n');
         for (const match of picMatches) {
             const fullTag = match[0];
-            const rawPrompt = (match[1] || '').trim();
+            const rawPrompt = (match[1] || match[2] || '').trim();
             const matchIndex = match.index;
             if (!rawPrompt) {
                 replacements.push({ index: matchIndex, length: fullTag.length, replacement: '' });
@@ -2924,7 +3016,7 @@ async function applyCharacterImageDisplayMode() {
         const template = settings.messageImageTextTemplate || DEFAULT_SETTINGS.messageImageTextTemplate;
         for (const match of picMatches) {
             const fullTag = match[0];
-            const prompt = (match[1] || '').trim();
+            const prompt = (match[1] || match[2] || '').trim();
             const matchIndex = match.index;
             if (!prompt) {
                 replacements.push({ index: matchIndex, length: fullTag.length, replacement: '' });
